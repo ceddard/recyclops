@@ -1,0 +1,78 @@
+version: '3.9'
+
+services:
+  # LocalStack para simular AWS localmente (SQS, DynamoDB, etc)
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs,dynamodb
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+    volumes:
+      - "${TMPDIR:-.}/.localstack:/tmp/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+  # CERS-IA Service
+  cers-ia:
+    build:
+      context: ./services/recyclops
+      dockerfile: Dockerfile
+    container_name: recyclops-cers-ia
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=8000
+      - AWS_REGION=us-east-1
+    depends_on:
+      - localstack
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Bypass API
+  bypass-api:
+    build:
+      context: ./services/bypass-api
+      dockerfile: Dockerfile
+    container_name: recyclops-bypass-api
+    ports:
+      - "8001:8001"
+    environment:
+      - DYNAMODB_BYPASS=recyclops-bypass-rules
+      - AWS_REGION=us-east-1
+      - PORT=8001
+      - AWS_ENDPOINT_URL=http://localstack:4566
+    depends_on:
+      - localstack
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+
+  # Accessibility Analyzer (SQS Worker)
+  analyzer:
+    build:
+      context: ./services/accessibility-analyzer
+      dockerfile: Dockerfile
+    container_name: recyclops-analyzer
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SQS_URL=http://localstack:4566/000000000000/recyclops-accessibility.fifo
+      - DLQ_URL=http://localstack:4566/000000000000/recyclops-analyzer-dlq.fifo
+      - CERS_IA_URL=http://cers-ia:8000
+      - BYPASS_API_URL=http://bypass-api:8001
+      - DYNAMODB_REPORTS=recyclops-reports
+      - DYNAMODB_BYPASS=recyclops-bypass-rules
+      - SCORE_THRESHOLD=50
+      - AWS_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+    depends_on:
+      - localstack
+      - cers-ia
+      - bypass-api
+    command: python main.py
+
+networks:
+  default:
+    name: recyclops-network
